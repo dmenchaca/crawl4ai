@@ -2,7 +2,7 @@ import os
 import sys
 import time
 from typing import List, Optional, Dict
-from fastapi import FastAPI, HTTPException, Request, Query, Path, Depends
+from fastapi import FastAPI, HTTPException, Request, Query, Path, Depends, BackgroundTasks
 from fastapi.responses import StreamingResponse, RedirectResponse, PlainTextResponse, JSONResponse
 from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -19,7 +19,9 @@ from api import (
     handle_llm_qa,
     handle_stream_crawl_request,
     handle_crawl_request,
-    stream_results
+    stream_results,
+    create_new_task,
+    handle_task_status
 )
 from auth import create_access_token, get_token_dependency, TokenRequest  # Import from auth.py
 
@@ -169,6 +171,38 @@ async def crawl_stream(
         media_type='application/x-ndjson',
         headers={'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Stream-Status': 'active'}
     )
+
+@app.post("/crawl/async")
+@limiter.limit(config["rate_limiting"]["default_limit"])
+async def crawl_async(
+    request: Request,
+    crawl_request: CrawlRequest,
+    background_tasks: BackgroundTasks,
+    token_data: Optional[Dict] = Depends(token_dependency)
+):
+    if not crawl_request.urls:
+        raise HTTPException(status_code=400, detail="At least one URL required")
+    # Only support single URL for now (can be extended)
+    url = crawl_request.urls[0]
+    query = crawl_request.crawler_config.get("instruction", "Extract main content")
+    schema = crawl_request.crawler_config.get("schema")
+    cache = crawl_request.crawler_config.get("cache", "0")
+    base_url = str(request.base_url).rstrip("/")
+    return await create_new_task(
+        redis,
+        background_tasks,
+        url,
+        query,
+        schema,
+        cache,
+        base_url,
+        config
+    )
+
+@app.get("/task/{task_id}")
+async def get_task_status(task_id: str, request: Request):
+    base_url = str(request.base_url).rstrip("/")
+    return await handle_task_status(redis, task_id, base_url)
 
 if __name__ == "__main__":
     import uvicorn
